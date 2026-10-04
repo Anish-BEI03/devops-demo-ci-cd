@@ -1,0 +1,15 @@
+---
+extends: default
+
+rules:
+  line-length: disable
+  document-start: disable
+  truthy:
+    check-keys: false
+  new-lines: disable
+  comments:
+    min-spaces-from-content: 1
+
+ignore: |
+  node_modules/
+  app/node_modules/

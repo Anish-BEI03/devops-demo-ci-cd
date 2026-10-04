@@ -1,0 +1,83 @@
+name: Deploy
+description: Pin the image, validate, apply with Kustomize, wait, smoke test, roll back on failure
+
+inputs:
+  environment:
+    description: Overlay and namespace name (staging or prod)
+    required: true
+  image:
+    description: Image reference including digest
+    required: true
+  kube-config:
+    description: kubeconfig contents
+    required: true
+  public-url:
+    description: Base URL used by the smoke test
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Configure kubectl
+      shell: bash
+      env:
+        KUBE_CONFIG: ${{ inputs.kube-config }}
+      run: |
+        mkdir -p ~/.kube
+        printf '%s' "$KUBE_CONFIG" > ~/.kube/config
+        chmod 600 ~/.kube/config
+
+    - name: Install kubeconform
+      shell: bash
+      run: |
+        curl -sSL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+        sudo mv kubeconform /usr/local/bin/
+
+    - name: Pin image and validate manifests
+      shell: bash
+      working-directory: k8s/overlays/${{ inputs.environment }}
+      env:
+        IMAGE: ${{ inputs.image }}
+      run: |
+        kustomize edit set image "app=${IMAGE}"
+        kustomize build . | kubeconform -strict -summary -ignore-missing-schemas -
+
+    - name: Show what will change
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+      run: kubectl diff -k "k8s/overlays/${ENVIRONMENT}" || true
+
+    - name: Apply
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+      run: kubectl apply -k "k8s/overlays/${ENVIRONMENT}"
+
+    - name: Wait for rollout
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+      run: kubectl rollout status deployment/demo -n "$ENVIRONMENT" --timeout=180s
+
+    - name: Smoke test
+      shell: bash
+      env:
+        URL: ${{ inputs.public-url }}
+        EXPECTED: ${{ github.sha }}
+      run: |
+        for i in $(seq 1 10); do
+          got=$(curl -fsS "$URL/version" | jq -r .version || true)
+          if [ "$got" = "$EXPECTED" ]; then echo "version $got is live"; exit 0; fi
+          echo "attempt $i: got '$got'"; sleep 5
+        done
+        echo "smoke test failed"; exit 1
+
+    - name: Roll back on failure
+      if: failure()
+      shell: bash
+      env:
+        ENVIRONMENT: ${{ inputs.environment }}
+      run: |
+        kubectl rollout undo deployment/demo -n "$ENVIRONMENT"
+        kubectl rollout status deployment/demo -n "$ENVIRONMENT" --timeout=180s
